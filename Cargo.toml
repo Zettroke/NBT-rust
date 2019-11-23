@@ -8,3 +8,4 @@ edition = "2018"
 
 [dependencies]
 bytes = "0.4"
+linked-hash-map = "0.5.2"
