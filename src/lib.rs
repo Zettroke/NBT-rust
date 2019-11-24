@@ -27,35 +27,29 @@ pub mod nbt {
 
     }
 
-//    #[derive(Debug)]
-//    pub struct NBT {
-//        pub name: String,
-//        pub data: NBT
-//    }
-
     pub struct ReadWrapper<T: Read> {
-        inner: T,
-        name_buff: [u8; 2]
+        inner: T
     }
 
     impl<T: Read> ReadWrapper<T> {
         pub fn from(input: T) -> ReadWrapper<T> {
             return ReadWrapper{
-                inner: input,
-                name_buff: [0u8; 2]
+                inner: input
             };
         }
 
-        pub fn read_n(&mut self, buff: &mut Vec<u8>, n: usize) {
+        #[allow(unused_must_use)]
+        pub fn read_n(&mut self, buff: &mut [u8], n: usize) {
             self.read(&mut buff[0..n]);
         }
 
+        #[allow(unused_must_use)]
         pub fn read_name(&mut self) -> String {
-            let mut name_buff = &mut [0u8; 2];
+            let name_buff = &mut [0u8; 2];
             self.read(name_buff);
-            let mut n = BigEndian::read_u16(name_buff) as usize;
+            let n = BigEndian::read_u16(name_buff) as usize;
             if n == 0{
-                String::new()
+                "empty".to_string()
             } else{
                 let mut buff = vec![0; n];
                 self.read(&mut buff);
@@ -64,7 +58,7 @@ pub mod nbt {
             }
         }
 
-        pub fn read_plain_nbt(&mut self, t: u8, buff: &mut Vec<u8>) -> NBT {
+        pub fn read_plain_nbt(&mut self, t: u8, buff: &mut [u8]) -> NBT {
             match t {
                 0x01 => { // Byte
                     self.read_n(buff, 1);
@@ -99,7 +93,7 @@ pub mod nbt {
 
                     while cur < n {
                         cur += self.read(buff).unwrap();
-                        res.extend_from_slice(buff.as_mut_slice());
+                        res.extend_from_slice(buff);
                     }
 
                     NBT::ByteArray(res)
@@ -132,56 +126,74 @@ pub mod nbt {
             }
         }
 
-        pub fn new() {
+        pub fn new() {}
 
+        pub fn read_list(src: &mut ReadWrapper<&mut impl Read>, buff: &mut [u8]) -> NBT {
+            src.read_n(buff, 1);
+            let list_t = buff[0];
+
+            src.read_n(buff, 4);
+            let n = u32::from_be_bytes([buff[0], buff[1], buff[2], buff[3]]) as usize;
+
+            let mut container: Vec<NBT> = Vec::with_capacity(n);
+
+            match list_t {
+                1..=8 => {
+                    for _ in 0..n {
+                        container.push(src.read_plain_nbt(list_t, buff));
+                    }
+                },
+                9 => {
+                    for _ in 0..n {
+                        container.push(NBT::read_list(src, buff));
+                    }
+                },
+                10 => {
+                    for _ in 0..n {
+                        container.push(NBT::read_compound(src, buff));
+                    }
+                },
+                _ => {}
+            };
+
+            return NBT::List(container);
         }
-        pub fn from(input: &mut impl Read) -> Result<NBT, Error> {
 
-            let mut stack: Vec<(String, NBT)> = vec![];
-            let mut src = ReadWrapper::from(input);
-            let buff = &mut vec![0u8; BUFF_SIZE];
-
+        pub fn read_compound(src: &mut ReadWrapper<&mut impl Read>, buff: &mut [u8]) -> NBT {
+            let mut container = LinkedHashMap::new();
             loop {
                 src.read_n(buff, 1);
                 let t = buff[0];
 
                 if t == 0 {
-                    let (name, closed_tag) = stack.pop().unwrap();
-                    if stack.len() > 0 {
-                        stack.last_mut().unwrap().1.as_mut_compound().unwrap().insert(name, closed_tag);
-                        continue
-                    } else {
-                        return Ok(closed_tag);
-                    }
+                    break
                 }
 
                 let name = src.read_name();
-                let v = match t {
-                    0x01..=0x08 => {
+                
+                let value = match t {
+                    1..=8 => {
                         src.read_plain_nbt(t, buff)
                     },
-                    0x09 => { // List
-                        src.read_n(buff, 1);
-                        let list_t = buff[0];
-                        src.read_n(buff, 4);
-                        let n = u32::from_be_bytes([buff[0], buff[1], buff[2], buff[3]]) as usize;
-                        let mut res: Vec<NBT> = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            res.push(src.read_plain_nbt(list_t, buff));
-                        }
-
-                        NBT::List(res)
-                    }, // Compound
-                    0x0A => {
-                        stack.push((name, NBT::Compound(LinkedHashMap::new())));
-                        continue
-                    }
-                    _ => NBT::String(String::from("Invalid tag!!!"))
+                    9 => {
+                        NBT::read_list(src, buff)
+                    },
+                    10 => {
+                        NBT::read_compound(src, buff)
+                    },
+                    _ => NBT::String("Invalid tag!!".to_string())
                 };
 
-                let mut parent = stack.last_mut().unwrap().1.as_mut_compound().unwrap();
-                parent.insert(name, v);
+                container.insert(name, value);
             }
+
+            return NBT::Compound(container);
+        }
+        pub fn from(input: &mut impl Read) -> Result<NBT, Error> {
+            let mut src = ReadWrapper::from(input);
+            let buff = &mut vec![0u8; BUFF_SIZE];
+
+            return Ok(NBT::read_compound(&mut src, buff.as_mut_slice()));
         }
 
         fn rec_fmt(&self, f: &mut fmt::Formatter<'_>, padding: &str) -> fmt::Result {
@@ -189,23 +201,67 @@ pub mod nbt {
                 NBT::Compound(v) => {
                     let mut new_padding = padding.to_owned();
                     new_padding.push_str("  ");
-                    for (k, value) in self.as_compound().unwrap() {
-                        write!(f, "{}", padding);
-                        write!(f, "{}: ", k);
-
-                        if let NBT::Compound(_) = value {
-                            writeln!(f, "");
-                            value.rec_fmt(f, &new_padding);
-                        } else {
-                            value.rec_fmt(f, "");
-                            writeln!(f, "");
-                        }
-
-
+                    for (k, value) in v {
+                        write!(f, "{}{}: ", padding, k)?;
+                        match value {
+                            NBT::Compound(tmp) => {
+                                writeln!(f, "({}) entries", tmp.len())?;
+                                value.rec_fmt(f, &new_padding)?;
+                            },
+                            NBT::List(_) => {
+                                value.rec_fmt(f, &new_padding)?;
+                                writeln!(f, "")?;
+                            },
+                            _ => {
+                                value.rec_fmt(f, "")?;
+                                writeln!(f, "")?;
+                            }
+                        };
                     }
-                }
+                },
+                NBT::List(v) => {
+                    if let NBT::Compound(_) = v.first().unwrap_or(&NBT::Byte(1)) {
+                        let mut new_padding = padding.to_owned();
+                        new_padding.push_str("  ");
+                        writeln!(f, "({}) entries [", v.len())?;
+                        for value in v {
+                            value.rec_fmt(f, &new_padding)?;
+                            writeln!(f, "{},", padding)?;
+                        }
+                        write!(f, "{}]", padding)?;
+
+                    } else {
+                        write!(f, "({}) entries [", v.len())?;
+                        let mut values = Vec::with_capacity(v.len());
+                        for i in v {
+                            values.push(i.to_string());
+                        }
+                        write!(f, "{}]", values.join(", "))?;
+                    }
+                },
+                NBT::Byte(v) => {
+                    write!(f, "0x{:0>2X}", v)?;
+                },
+                NBT::Short(v) => {
+                    write!(f, "{}", v)?;
+                },
+                NBT::Int(v) => {
+                    write!(f, "{}", v)?;
+                },
+                NBT::Long(v) => {
+                    write!(f, "{}", v)?;
+                },
+                NBT::Float(v) => {
+                    write!(f, "{}", v)?;
+                },
+                NBT::Double(v) => {
+                    write!(f, "{}", v)?;
+                },
+                NBT::String(v) => {
+                    write!(f, "\"{}\"", v)?;
+                },
                 _ => {
-                    write!(f, "{:?}", self);
+                    write!(f, "{:?}", self)?;
                 }
             };
             return Ok(());
@@ -233,21 +289,7 @@ mod tests {
     fn it_works() {
         let mut f = File::open("Bikini Bottom V2/level").unwrap();
         let mut buff = vec![0u8; 16];
-        let res = NBT::from(&mut f);
+        let res = NBT::from(&mut f).unwrap();
         println!("{:?}", res);
-
-//        let s = String::from("Kappa");
-//        let v = NBT {
-//            name: s.clone(),
-//            data: NBT::Byte(12u8)
-//        };
-//        let mut m: HashMap<String, Box<NBT>> = HashMap::new();
-//        m.insert(s, Box::from(v));
-//        let mut n = NBT {
-//            name: String::from("dasdsa"),
-//            data: NBT::Compound(m)
-//        };
-
-//        println!("{:?}", n);
     }
 }
