@@ -1,4 +1,4 @@
-#![feature(test)]
+//#![feature(test)]
 pub mod nbt {
     extern crate bytes;
 
@@ -8,6 +8,8 @@ pub mod nbt {
 
     use linked_hash_map::LinkedHashMap;
     use core::fmt;
+    use self::bytes::{BytesMut, BufMut};
+    use std::any::Any;
 
     static BUFF_SIZE: usize = 65536;
 
@@ -36,12 +38,10 @@ pub mod nbt {
             };
         }
 
-        #[allow(unused_must_use)]
         pub fn read_n(&mut self, buff: &mut [u8], n: usize) {
             self.read(&mut buff[0..n]);
         }
 
-        #[allow(unused_must_use)]
         pub fn read_name(&mut self) -> String {
             let name_buff = &mut [0u8; 2];
             self.read(name_buff);
@@ -132,7 +132,6 @@ pub mod nbt {
 
             return NBT::Compound(container);
         }
-
         pub fn read_list(&mut self, buff: &mut [u8]) -> NBT {
             self.read_n(buff, 1);
             let list_t = buff[0];
@@ -163,6 +162,8 @@ pub mod nbt {
 
             return NBT::List(container);
         }
+
+
     }
 
     impl<T: Read> Read for ReadWrapper<T> {
@@ -184,6 +185,12 @@ pub mod nbt {
                 _ => Result::Err(Error::new(ErrorKind::Other, "not a compound"))
             }
         }
+        pub fn as_list(&self) -> Result<&Vec<NBT>, Error> {
+            match self {
+                NBT::List(v) => Result::Ok(v),
+                _ => Result::Err(Error::new(ErrorKind::Other, "not a list"))
+            }
+        }
 
         pub fn get(&self, name: &str) -> Option<&NBT> {
             match self {
@@ -191,7 +198,6 @@ pub mod nbt {
                 _ => Option::None
             }
         }
-
         pub fn get_mut(&mut self, name: &str) -> Option<&mut NBT> {
             match self {
                 NBT::Compound(v) => v.get_mut(name),
@@ -199,9 +205,16 @@ pub mod nbt {
             }
         }
 
+        pub fn is_compound(&self) -> bool {
+            match self {
+                NBT::Compound(_) => true,
+                _ => false
+            }
+        }
+
         pub fn new() {}
 
-        pub fn from<T: Read>(input: &mut T) -> Result<NBT, Error> {
+        pub fn load<T: Read>(input: &mut T) -> Result<NBT, Error> {
             let mut src = ReadWrapper::from(input);
             let buff = &mut vec![0u8; BUFF_SIZE];
             let mut res = src.read_compound(buff.as_mut_slice());
@@ -277,6 +290,108 @@ pub mod nbt {
             };
             return Ok(());
         }
+
+        pub fn dump(&self) -> Vec<u8> {
+            let mut res = BytesMut::with_capacity(1024*1024); // TODO: add auto resize somehow
+            res.put_slice(&[10, 0, 0]);
+            NBT::write_compound(self, &mut res);
+            res.put_u8(0);
+            return res.to_vec();
+        }
+
+        fn write_plain(tag: &NBT, res: &mut BytesMut) {
+            match tag {
+                NBT::Byte(v) => res.put_u8(*v),
+                NBT::Short(v) => res.put_i16_be(*v),
+                NBT::Int(v) => res.put_i32_be(*v),
+                NBT::Long(v) => res.put_i64_be(*v),
+                NBT::Float(v) => res.put_f32_be(*v),
+                NBT::Double(v) => res.put_f64_be(*v),
+                NBT::ByteArray(v) => {
+                    res.put_i32_be(v.len() as i32);
+                    res.put_slice(&v);
+                }
+                NBT::String(v) => {
+                    res.put_i16_be(v.len() as i16);
+                    res.put_slice(v.as_bytes());
+                }
+                _ => {
+                    panic!("Should not happen!!!");
+                }
+            }
+        }
+
+        fn write_list(tag: &NBT, res: &mut BytesMut) {
+            if let NBT::List(list) = tag {
+                if list.len() == 0 {
+                    res.put_u8(1); // dunno should i save type for empty lists?
+                    res.put_i32_be(0);
+                    return;
+                }
+                let item = list.first().unwrap();
+                res.put_u8(NBT::get_type_id(item)); // type_id
+                res.put_i32_be(list.len() as i32); // len
+                match item {
+                    NBT::Compound(_) => {
+                        for tag in list {
+                            NBT::write_compound(tag, res);
+                        }
+                    },
+                    NBT::List(_) => {
+                        for tag in list {
+                            NBT::write_list(tag, res);
+                        }
+                    },
+                    _ => {
+                        for tag in list {
+                            NBT::write_plain(tag, res);
+                        }
+                    }
+                }
+            }
+            
+        }
+
+        fn write_compound(tag: &NBT, res: &mut BytesMut) {
+            if let NBT::Compound(comp) = tag {
+                for (key, value) in comp {
+                    res.put_u8(NBT::get_type_id(value));
+                    res.put_i16_be(key.len() as i16);
+                    res.put_slice(key.as_bytes());
+
+                    match value {
+                        NBT::Compound(_) => {
+                            NBT::write_compound(value, res);
+                        },
+                        NBT::List(_) => {
+                            NBT::write_list(value, res);
+                        },
+                        _ => {
+                            NBT::write_plain(value, res);
+                        }
+                    }
+                }
+                res.put_u8(0);
+            }
+        }
+        
+        fn get_type_id(tag: &NBT) -> u8 {
+            match tag {
+                NBT::Byte(_) => 1u8,
+                NBT::Short(_) => 2u8,
+                NBT::Int(_) => 3u8,
+                NBT::Long(_) => 4u8,
+                NBT::Float(_) => 5u8,
+                NBT::Double(_) => 6u8,
+                NBT::ByteArray(_) => 7u8,
+                NBT::String(_) => 8u8,
+                NBT::List(_) => 9u8,
+                NBT::Compound(_) => 10u8,
+                _ => {
+                    panic!("Should not happen!!!");
+                }
+            }
+        }
     }
 
     impl fmt::Display for NBT {
@@ -289,37 +404,37 @@ pub mod nbt {
 
 #[cfg(test)]
 mod tests {
-    extern crate test;
+//    extern crate test;
     use std::fs::File;
     use crate::nbt::NBT;
     use std::collections::HashMap;
     use std::fmt::Debug;
     use std::io::Read;
-    use test::Bencher;
+//    use test::Bencher;
     use std::convert::TryInto;
 
     #[test]
     fn it_works() {
         let mut f = File::open("Bikini Bottom V2/level").unwrap();
         let mut buff = vec![0u8; 16];
-        let res = NBT::from(&mut f).unwrap();
+        let res = NBT::load(&mut f).unwrap();
         println!("{:?}", res);
     }
 
-    #[bench]
-    fn bench_read(b: &mut Bencher) {
-        let mut f = File::open("Bikini Bottom V2/level").unwrap();
-        let mut buff = Vec::new();
-        f.read_to_end(&mut buff);
-        let mut v = vec![];
-        b.iter(|| {
-            let mut s = buff.as_slice();
-            let res = NBT::from(&mut s).unwrap();
-            println!("{}", res.as_compound().unwrap().len());
-            v.push(1);
-        });
-        println!("{}", v.len());
-    }
+//    #[bench]
+//    fn bench_read(b: &mut Bencher) {
+//        let mut f = File::open("Bikini Bottom V2/level").unwrap();
+//        let mut buff = Vec::new();
+//        f.read_to_end(&mut buff);
+//        let mut v = vec![];
+//        b.iter(|| {
+//            let mut s = buff.as_slice();
+//            let res = NBT::from(&mut s).unwrap();
+//            println!("{}", res.as_compound().unwrap().len());
+//            v.push(1);
+//        });
+//        println!("{}", v.len());
+//    }
 }
 
 
