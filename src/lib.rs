@@ -8,7 +8,7 @@ pub mod nbt {
 
     use linked_hash_map::LinkedHashMap;
     use core::fmt;
-    use self::bytes::{BytesMut, BufMut};
+    use self::bytes::{BytesMut, BufMut, Buf};
     use std::any::Any;
 
     static BUFF_SIZE: usize = 65536;
@@ -24,7 +24,7 @@ pub mod nbt {
         ByteArray(Vec<u8>),
         String(String),
         List(Vec<NBT>),
-        Compound(LinkedHashMap<String, NBT>),
+        Compound(Box<LinkedHashMap<String, NBT>>),
     }
 
     pub struct ReadWrapper<T: Read> {
@@ -130,7 +130,7 @@ pub mod nbt {
                 container.insert(name, value);
             }
 
-            return NBT::Compound(container);
+            return NBT::Compound(Box::new(container));
         }
         pub fn read_list(&mut self, buff: &mut [u8]) -> NBT {
             self.read_n(buff, 1);
@@ -226,7 +226,7 @@ pub mod nbt {
                 NBT::Compound(v) => {
                     let mut new_padding = padding.to_owned();
                     new_padding.push_str("  ");
-                    for (k, value) in v {
+                    for (k, value) in v.iter() {
                         write!(f, "{}{}: ", padding, k)?;
                         match value {
                             NBT::Compound(tmp) => {
@@ -292,14 +292,20 @@ pub mod nbt {
         }
 
         pub fn dump(&self) -> Vec<u8> {
-            let mut res = BytesMut::with_capacity(1024*1024); // TODO: add auto resize somehow
+            let mut res = BytesMut::with_capacity(512); // TODO: add auto resize somehow
             res.put_slice(&[10, 0, 0]);
             NBT::write_compound(self, &mut res);
+            res.reserve(1);
             res.put_u8(0);
+
+            println!("Final capacity {}", res.capacity());
             return res.to_vec();
         }
 
         fn write_plain(tag: &NBT, res: &mut BytesMut) {
+            if res.capacity() - res.len() < 64 {
+                res.reserve(res.len() / 2);
+            }
             match tag {
                 NBT::Byte(v) => res.put_u8(*v),
                 NBT::Short(v) => res.put_i16_be(*v),
@@ -323,6 +329,10 @@ pub mod nbt {
 
         fn write_list(tag: &NBT, res: &mut BytesMut) {
             if let NBT::List(list) = tag {
+                if res.capacity() - res.len() < 64 {
+                    res.reserve(res.len() / 2);
+                }
+
                 if list.len() == 0 {
                     res.put_u8(1); // dunno should i save type for empty lists?
                     res.put_i32_be(0);
@@ -354,7 +364,11 @@ pub mod nbt {
 
         fn write_compound(tag: &NBT, res: &mut BytesMut) {
             if let NBT::Compound(comp) = tag {
-                for (key, value) in comp {
+                if res.capacity() - res.len() < 64 {
+                    res.reserve(res.len() / 2);
+                }
+
+                for (key, value) in comp.iter() {
                     res.put_u8(NBT::get_type_id(value));
                     res.put_i16_be(key.len() as i16);
                     res.put_slice(key.as_bytes());
