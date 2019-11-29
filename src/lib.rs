@@ -1,5 +1,5 @@
 //#![feature(test)]
-pub mod nbt {
+pub mod nbt_rust {
     extern crate bytes;
 
     use std::io::{Read, Error, ErrorKind};
@@ -420,7 +420,7 @@ pub mod nbt {
 mod tests {
 //    extern crate test;
     use std::fs::File;
-    use crate::nbt::NBT;
+    use crate::nbt_rust::NBT;
     use std::collections::HashMap;
     use std::fmt::Debug;
     use std::io::Read;

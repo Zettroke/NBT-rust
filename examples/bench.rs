@@ -1,4 +1,4 @@
-use nbt_rust::nbt::NBT;
+use nbt_rust::nbt_rust::NBT;
 use std::fs::File;
 use std::io::{Write, Read};
 use std::cell::RefCell;
